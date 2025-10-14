@@ -1,0 +1,17 @@
+#!/bin/bash
+#PBS -P e53
+#PBS -q normalsr
+#PBS -l walltime=48:00:00
+#PBS -l mem=500GB
+#PBS -l ncpus=104
+#PBS -l jobfs=400GB
+#PBS -l storage=gdata/xv83+scratch/e53+gdata/xp65+gdata/hh5+gdata/hq89+scratch/xv83
+#PBS -j oe
+
+module use /g/data/xp65/public/modules
+module load conda/analysis3-25.07
+
+cd $PBS_O_WORKDIR
+
+echo "Starting WBGT calculation for model ${MODEL}, experiment ${EXPERIMENT}, year ${YEAR}"
+python calculate_wbgt_aus10i_ssp126.py ${YEAR} ${MODEL} ${EXPERIMENT}

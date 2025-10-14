@@ -1,4 +1,13 @@
 # PyWBGT_analytic
+### This fork is used to calculate WBGT for ACS
+- As below, use setupcoszenith.py to build the shared object (.so) file. This can be done in xp65 conda environment using
+  - module use /g/data/xp65/public/modules
+  - module load conda/analysis3-25.09
+- The bash scripts (e.g., job_launcher_wbgt_aus10i_hist.sh) are used to submit PBS jobs (wbgt_job_aus10i_hist.pbs) which references the python scripts (calculate_wbgt_aus10i_hist.py)
+- *_noleap should be used for models with non-standard calendars (e.g., CCAM CESM2)
+- For CESM2 ssp*, link the historical 1hr 2014 variables to fix rsdsdir and allow for better interpolation of the first 2015 timestep
+
+****
 The model developed by Liljegren et al (2008) [1] is the recommended approach for esmating wet-bulb globe temperature (WBGT) [2], but it requires iterative calculation from solving the nonlinear enegy balance equations of the wet wick and black globe sensors. By carefully exmaining self-nonlinearities in Liljegren's model, we develop an analytic WBGT approximation that doesn't require iteration while maintaining high accuracy and most of the physics of Liljegren's model.
 
 ****
