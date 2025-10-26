@@ -9,7 +9,6 @@ import xarray as xr
 import dask.array as da
 import pandas as pd
 import glob
-
 from coszenith import coszda, cosza
 import WBGT_analytic
 
@@ -39,37 +38,99 @@ def preprocess_coords(ds):
         ds = ds.assign_coords(lat=ds.lat.round(1))
     return ds
 
-def open_local_datasets(base_dir, variables, version):
+def open_local_datasets(base_dir, variables, version, target_year):
     """Open local NetCDF datasets for each variable into a dictionary of DataArrays."""
     dsets = dict()
     ocals = dict()
+    ounits = dict()
     standard_calendars = ["proleptic_gregorian", "gregorian", "standard"]  # standard calendars
+
+    start_year = target_year - 1
+    end_year = target_year + 1
+
+    sel_years = [start_year, target_year, end_year]
 
     for var in variables:
         pattern = os.path.join(base_dir, var, version, '*.nc')
         print(f"Looking for files with pattern: {pattern}")
-        files = sorted(glob.glob(pattern))
-        if not files:
+        all_files = sorted(glob.glob(pattern))
+        if not all_files:
             print(f"No files found for variable: {var}")
             continue
+
+       # --- Filter files by year range ---
+        files = []
+        for y in sel_years:
+            files.extend(glob.glob(os.path.join(base_dir, var, version, f"*_{y}*-{y}*.nc")))
+
+        if not files:
+            print(f"No files found in range {start_year}-{end_year} for {var}")
+            continue
+
+        print(f"Opening {len(files)} files for {var} ({start_year}-{end_year})")
+
         ds = xr.open_mfdataset(files, combine='by_coords', parallel=True, engine='h5netcdf', chunks="auto", preprocess=preprocess_coords)
         ds = drop_all_bounds(ds)
 
         original_calendar = ds.time.encoding.get('calendar', 'standard')
-        ocals[var] = original_calendar
-        
-        # Convert non-standard calendars to proleptic_gregorian
-        print(ds.time.encoding.get('calendar', 'standard'))
+        original_units = ds.time.encoding.get('units', 'days since 1950-01-01')
 
+        ocals[var] = original_calendar
+        ounits[var] = original_units
+
+        # Convert non-standard calendars to proleptic_gregorian
         if (ds.time.encoding.get('calendar', 'standard')) not in standard_calendars:
             ds = ds.convert_calendar("proleptic_gregorian", use_cftime=False)
+        
+            # --- Detect offset (e.g., 00:00 vs 00:30) ---
+            first_ts = pd.Timestamp(ds.time.values[0])
+            offset_minutes = first_ts.minute
+            offset_seconds = first_ts.second
+        
+            # --- Insert Feb 29 timestamps (NaN-filled) for leap years ---
+            years = np.unique(ds.time.dt.year)
+            new_times = list(ds.time.values)
+        
+            for y in years:
+                # Check if leap year
+                if (y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)):
+                    start = f"{y}-02-29T00:{offset_minutes:02d}:{offset_seconds:02d}"
+                    end   = f"{y}-02-29T23:{offset_minutes:02d}:{offset_seconds:02d}"
 
-        print(ds.time.encoding.get('calendar', 'standard'))
+                    feb29_hours = pd.date_range(start=start, end=end, freq="1H").to_numpy()
+        
+                    for t in feb29_hours:
+                        if t not in new_times:
+                            new_times.append(t)
+        
+            # Reindex to include Feb 29 (NaNs filled in)
+            new_times = np.sort(np.array(new_times))
+            ds = ds.reindex(time=new_times)
+        
+            for y in years:
+                if (y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)):
+                    # --- Early morning: 00–02 h from March 1 ---
+                    for h in range(0, 3):  # range(0, 3) = 0,1,2 hours
+                        feb29_time = np.datetime64(f"{y}-02-29T{h:02d}:{offset_minutes:02d}:{offset_seconds:02d}")
+                        mar1_time  = np.datetime64(f"{y}-03-01T{h:02d}:{offset_minutes:02d}:{offset_seconds:02d}")
+                        if mar1_time in ds.time.values and feb29_time in ds.time.values:
+                            ds.loc[dict(time=feb29_time)] = ds.sel(time=mar1_time)
+            
+                    # --- Late evening: 21–23 h from Feb 28 ---
+                    for h in range(21, 24):  # range(21, 24) = 21,22,23 hours
+                        feb28_time = np.datetime64(f"{y}-02-28T{h:02d}:{offset_minutes:02d}:{offset_seconds:02d}")
+                        feb29_time = np.datetime64(f"{y}-02-29T{h:02d}:{offset_minutes:02d}:{offset_seconds:02d}")
+                        if feb28_time in ds.time.values and feb29_time in ds.time.values:
+                            ds.loc[dict(time=feb29_time)] = ds.sel(time=feb28_time)
+        
+            # Re-sort and reindex (insert NaNs for Feb 29)
+            new_times = np.sort(np.array(new_times))
+            ds = ds.reindex(time=new_times)
 
         dsets[var] = ds
-    return dsets, ocals
+    return dsets, ocals, ounits
 
-def interp(data, year, month, original_calendar):
+def interp(data, year, month):
     """
     Interpolates data to hourly steps within the given year and month.
 
@@ -95,10 +156,6 @@ def interp(data, year, month, original_calendar):
     end = f"{end_year}-{end_month:02d}-01T00:00:00.000000000"
 
     date = np.arange(np.datetime64(start), np.datetime64(end), np.timedelta64(1, 'h'))
-
-    if original_calendar not in standard_calendars:
-        date = date[~((pd.to_datetime(date).month == 2) &
-                      (pd.to_datetime(date).day == 29))]
 
     result = data.interp(time=date, method='linear')
     return result.chunk({'time': 24})
@@ -139,13 +196,10 @@ if __name__ == "__main__":
     variables = ['tas', 'huss', 'uas', 'vas', 'rsds', 'rsus', 'rlds', 'rlus', 'ps', 'rsdsdir']
 
     print("Opening datasets...")
-    dsets, ocals = open_local_datasets(BASE_DIR, variables, version)
+    dsets, ocals, ounits = open_local_datasets(BASE_DIR, variables, version, year)
     if not dsets:
         print("No datasets loaded, exiting.")
         sys.exit(1)
-
-    #years = np.unique(dsets['huss'].time.dt.year.values)
-    #print(f"Years to process: {years}")
 
     years = [year]
     for year in years:
@@ -189,83 +243,50 @@ if __name__ == "__main__":
             rsus = dsets['rsus'].sel(time=extended_sel).chunk({'time': 24}).rsus
             rsdsdir = dsets['rsdsdir'].sel(time=extended_sel).chunk({'time': 24}).rsdsdir
 
-            # print time for variables
-            print("DATASET TIMES")
-            print("DATASET TIMES")
-            print("DATASET TIMES")
-            print(huss.time)
-            print(tas.time)
-            print(ps.time)
-            print(uas.time)
-            print(vas.time)
-            print(rlds.time)
-            print(rsds.time)
-            print(rlus.time)
-            print(rsus.time)
-            print("RSDSDIR")
-            print("RSDSDIR")
-            print("RSDSDIR")
-            print(rsdsdir.time)
-
-            # fix rsdsdir at the start of each month
-            # Step 1: Identify the target times (first of month at 00:30)
+            # fix rsdsdir at the start of each month and on Feb 29 00:30
+            # Step 1: Identify target times
             is_first_of_month = (rsdsdir['time'].dt.day == 1)
+            is_feb29 = (rsdsdir['time'].dt.month == 2) & (rsdsdir['time'].dt.day == 29)
             is_0030 = (rsdsdir['time'].dt.hour == 0) & (rsdsdir['time'].dt.minute == 30)
-            target_mask = is_first_of_month & is_0030
+            
+            target_mask = (is_first_of_month | is_feb29) & is_0030
             
             # Step 2: Shift time by one step to get previous and next values
             rsdsdir_prev = rsdsdir.shift(time=1)
             rsdsdir_next = rsdsdir.shift(time=-1)
             
-            first_of_month_time = f"{year}-{month:02d}-01T00:30:00"
-            print(
-                f"Before fix ({first_of_month_time}):",
-                float(
-                    rsdsdir.sel(time=first_of_month_time)
-                    .mean(dim=["lat", "lon"])
-                    .compute()
+            # Optional: debug print
+            target_times = rsdsdir['time'].where(target_mask, drop=True)
+            for t in target_times.values:
+                print(
+                    f"Before fix ({np.datetime_as_string(t)}):",
+                    float(rsdsdir.sel(time=t).mean(dim=["lat", "lon"]).compute())
                 )
-            )
             
             # Step 3: Interpolate linearly at target times
             rsdsdir = xr.where(
                 target_mask,
                 0.5 * (rsdsdir_prev + rsdsdir_next),
                 rsdsdir
-            )
+            ).rename("rsdsdir")
             
-            print(
-                f"After fix  ({first_of_month_time}):",
-                float(
-                    rsdsdir.sel(time=first_of_month_time)
-                    .mean(dim=["lat", "lon"])
-                    .compute()
+            # Optional: print after-fix diagnostics
+            for t in target_times.values:
+                print(
+                    f"After fix  ({np.datetime_as_string(t)}):",
+                    float(rsdsdir.sel(time=t).mean(dim=["lat", "lon"]).compute())
                 )
-            )
-
-            rsdsdiff = rsds - rsdsdir
+            
+            # Step 4: Compute difference
+            rsdsdiff = (rsds - rsdsdir).rename("rsdsdiff")
 
             # Interpolate radiation data to hourly
-            rsdsinterp = interp(rsds, year, month, ocals['rsds'])
-            rsusinterp = interp(rsus, year, month, ocals['rsus'])
-            rldsinterp = interp(rlds, year, month, ocals['rlds'])
-            rlusinterp = interp(rlus, year, month, ocals['rlus'])
-            rsdsdirinterp = interp(rsdsdir, year, month, ocals['rsdsdir'])
-            rsdsdiffinterp = interp(rsdsdiff, year, month, ocals['rsds'])
-
-            print("DATASET INTERPOLATED TIMES")
-            print("DATASET INTERPOLATED TIMES")
-            print("DATASET INTERPOLATED TIMES")
-
-            print(rsusinterp.time)
-            print(rldsinterp.time)
-            print(rlusinterp.time)
-            print(rsdsdiffinterp.time)
-            print("RSDSDIR")
-            print("RSDSDIR")
-            print("RSDSDIR")
-            print(rsdsinterp.time)
-            print(rsdsdirinterp.time)
+            rsdsinterp = interp(rsds, year, month)
+            rsusinterp = interp(rsus, year, month)
+            rldsinterp = interp(rlds, year, month)
+            rlusinterp = interp(rlus, year, month)
+            rsdsdirinterp = interp(rsdsdir, year, month)
+            rsdsdiffinterp = interp(rsdsdiff, year, month)
 
             # Create meshgrid for lat/lon in radians
             lon, lat = np.meshgrid(huss.lon.values, huss.lat.values)
@@ -353,6 +374,58 @@ if __name__ == "__main__":
         tnw_full = xr.concat(tnw_list, dim='time')
         tg_full = xr.concat(tg_list, dim='time')
         wbgt_full = xr.concat(wbgt_list, dim='time')
+
+        # --- Drop Feb 29 for non-standard calendars ---
+        standard_calendars = ["standard", "gregorian", "proleptic_gregorian"]
+
+        # infer calendar from one of your inputs (tas is usually fine)
+        original_calendar = ocals['tas']
+        original_units = ounits['tas']
+
+        if original_calendar not in standard_calendars:
+            print(f"Non-standard calendar detected ({original_calendar}) — dropping Feb 29.")
+            # Create mask for all times that are NOT Feb 29
+            not_feb29 = ~((tnw_full["time"].dt.month == 2) & (tnw_full["time"].dt.day == 29))
+            # Apply the mask to all outputs
+            tnw_full = tnw_full.sel(time=not_feb29)
+            tg_full = tg_full.sel(time=not_feb29)
+            wbgt_full = wbgt_full.sel(time=not_feb29)
+
+            # --- Restore original calendar ---
+            for name, da in zip(["tnw_full", "tg_full", "wbgt_full"], [tnw_full, tg_full, wbgt_full]):
+                new_time = xr.cftime_range(
+                    start=str(da["time"][0].values)[:10],
+                    periods=da.sizes["time"],
+                    freq="H",
+                    calendar=original_calendar
+                )
+
+                da = da.assign_coords(time=("time", new_time))
+
+                # Add CF-compliant attributes
+                da["time"].attrs.update({
+                    "standard_name": "time",
+                    "long_name": "time",
+                    "bounds": "time_bnds",
+                    "axis": "T",
+                })
+
+                # Define encoding for NetCDF output
+                da["time"].encoding = {
+                    "dtype": "double",
+                    "units": original_units,
+                    "calendar": original_calendar,
+                    "zlib": True,
+                    "complevel": 1,
+                    "_FillValue": 1e20,
+                }
+
+                if name == "tnw_full":
+                    tnw_full = da
+                elif name == "tg_full":
+                    tg_full = da
+                elif name == "wbgt_full":
+                    wbgt_full = da
 
         chunk_shape = (1, tnw_full.sizes["lat"], tnw_full.sizes["lon"])
 

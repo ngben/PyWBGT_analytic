@@ -39,16 +39,34 @@ def preprocess_coords(ds):
         ds = ds.assign_coords(lat=ds.lat.round(1))
     return ds
 
-def open_local_datasets(base_dir, variables, version):
+def open_local_datasets(base_dir, variables, version, target_year):
     """Open local NetCDF datasets for each variable into a dictionary of DataArrays."""
     dsets = dict()
+
+    start_year = target_year - 1
+    end_year = target_year + 1
+
+    sel_years = [start_year, target_year, end_year]
+
     for var in variables:
         pattern = os.path.join(base_dir, var, version, '*.nc')
         print(f"Looking for files with pattern: {pattern}")
-        files = sorted(glob.glob(pattern))
-        if not files:
+        all_files = sorted(glob.glob(pattern))
+        if not all_files:
             print(f"No files found for variable: {var}")
             continue
+
+       # --- Filter files by year range ---
+        files = []
+        for y in sel_years:
+            files.extend(glob.glob(os.path.join(base_dir, var, version, f"*_{y}*-{y}*.nc")))
+
+        if not files:
+            print(f"No files found in range {start_year}-{end_year} for {var}")
+            continue
+
+        print(f"Opening {len(files)} files for {var} ({start_year}-{end_year})")
+
         ds = xr.open_mfdataset(files, combine='by_coords', parallel=True, engine='h5netcdf', chunks="auto", preprocess=preprocess_coords)
         ds = drop_all_bounds(ds)
         dsets[var] = ds
@@ -120,13 +138,10 @@ if __name__ == "__main__":
     variables = ['tas', 'huss', 'uas', 'vas', 'rsds', 'rsus', 'rlds', 'rlus', 'ps', 'rsdsdir']
 
     print("Opening datasets...")
-    dsets = open_local_datasets(BASE_DIR, variables, version)
+    dsets = open_local_datasets(BASE_DIR, variables, version, year)
     if not dsets:
         print("No datasets loaded, exiting.")
         sys.exit(1)
-
-    #years = np.unique(dsets['huss'].time.dt.year.values)
-    #print(f"Years to process: {years}")
 
     years = [year]
     for year in years:
