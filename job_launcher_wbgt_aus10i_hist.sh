@@ -7,7 +7,7 @@ LOGDIR="./${MODEL}_historical_logs"
 # Make sure the log directory exists
 mkdir -p "${LOGDIR}"
 
-for year in {2011..2014}; do
+for year in {1951..1952}; do
     qsub -N wbgt_${MODEL}_${EXPERIMENT}_${year} \
          -v YEAR=${year},MODEL=${MODEL},EXPERIMENT=${EXPERIMENT} \
          -o ${LOGDIR}/wbgt_calc_${MODEL}_historical_${EXPERIMENT}_${year}.log \

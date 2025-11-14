@@ -35,6 +35,9 @@ def preprocess_coords(ds):
     # Round only lon/lat to 4 decimals (adjust precision if needed)
     if "lon" in ds.coords:
         ds = ds.assign_coords(lon=ds.lon.round(1))
+        # Shift all longitudes by +0.01 degrees (to the right)
+        lon_shifted = (ds.lon + 0.01) % 360
+        ds = ds.assign_coords(lon=lon_shifted.round(4))
     if "lat" in ds.coords:
         ds = ds.assign_coords(lat=ds.lat.round(1))
     return ds
@@ -317,6 +320,70 @@ if __name__ == "__main__":
         tnw_full = xr.concat(tnw_list, dim='time')
         tg_full = xr.concat(tg_list, dim='time')
         wbgt_full = xr.concat(wbgt_list, dim='time')
+
+        # Shift all longitudes by -0.01 degrees (to the left)
+        lon_shifted_back = (wbgt_full.lon - 0.01) % 360
+        tnw_full = tnw_full.assign_coords(lon=lon_shifted_back.round(4))
+        tg_full = tg_full.assign_coords(lon=lon_shifted_back.round(4))
+        wbgt_full = wbgt_full.assign_coords(lon=lon_shifted_back.round(4))
+
+        # fix lat/lon attributes
+        tnw_full = tnw_full.assign_coords(
+            lon=("lon", tnw_full.lon.values),
+            lat=("lat", tnw_full.lat.values)
+        )
+        tnw_full["lon"].attrs.update({
+            "standard_name": "longitude",
+            "long_name": "longitude",
+            "units": "degrees_east",
+            "axis": "X"
+        })
+        tnw_full["lat"].attrs.update({
+            "standard_name": "latitude",
+            "long_name": "latitude",
+            "units": "degrees_north",
+            "axis": "Y"
+        })
+        tnw_full["lon"].encoding["_FillValue"] = 1.e+20
+        tnw_full["lat"].encoding["_FillValue"] = 1.e+20
+
+        tg_full = tg_full.assign_coords(
+            lon=("lon", tg_full.lon.values),
+            lat=("lat", tg_full.lat.values)
+        )
+        tg_full["lon"].attrs.update({
+            "standard_name": "longitude",
+            "long_name": "longitude",
+            "units": "degrees_east",
+            "axis": "X"
+        })
+        tg_full["lat"].attrs.update({
+            "standard_name": "latitude",
+            "long_name": "latitude",
+            "units": "degrees_north",
+            "axis": "Y"
+        })
+        tg_full["lon"].encoding["_FillValue"] = 1.e+20
+        tg_full["lat"].encoding["_FillValue"] = 1.e+20
+
+        wbgt_full = wbgt_full.assign_coords(
+            lon=("lon", wbgt_full.lon.values),
+            lat=("lat", wbgt_full.lat.values)
+        )
+        wbgt_full["lon"].attrs.update({
+            "standard_name": "longitude",
+            "long_name": "longitude",
+            "units": "degrees_east",
+            "axis": "X"
+        })
+        wbgt_full["lat"].attrs.update({
+            "standard_name": "latitude",
+            "long_name": "latitude",
+            "units": "degrees_north",
+            "axis": "Y"
+        })
+        wbgt_full["lon"].encoding["_FillValue"] = 1.e+20
+        wbgt_full["lat"].encoding["_FillValue"] = 1.e+20
 
         chunk_shape = (1, tnw_full.sizes["lat"], tnw_full.sizes["lon"])
 
