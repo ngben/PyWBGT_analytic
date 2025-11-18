@@ -29,7 +29,7 @@ def cdo_compress(infile):
     print(f"Running: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
     os.replace(tmpfile, infile)
-    
+
 def drop_all_bounds(ds):
     """Drop coordinates like 'time_bounds' from datasets,
     which can lead to issues when merging."""
@@ -138,7 +138,6 @@ if __name__ == "__main__":
 
     model = sys.argv[2]
     experiment = sys.argv[3]
-    scenario = sys.argv[4]
 
     print(f"Processing year {year}, model {model}, experiment {experiment}")
 
@@ -149,12 +148,8 @@ if __name__ == "__main__":
     sys.path.insert(0, '/g/data/xv83/users/bxn599/ACS/wbgt/PyWBGT_analytic')
     client.run(lambda: sys.path.insert(0, '/g/data/xv83/users/bxn599/ACS/wbgt/PyWBGT_analytic'))
 
-    if scenario in ("historical", "evaluation"):
-        BASE_DIR = f'/g/data/hq89/CCAM/output/CMIP6/DD/AUS-10i/CSIRO/{model}/{scenario}/{experiment}/CCAM-v2203-SN/v1-r1/1hr'
-        version = 'v20231206'
-    else:
-        BASE_DIR = f'/g/data/xv83/CCAM/output/CMIP6/DD/AUS-10i/CSIRO/{model}/{scenario}/{experiment}/CCAM-v2203-SN/v1-r1/1hr'
-        version = 'v20250912'
+    BASE_DIR = f'/g/data/hq89/CCAM/output/CMIP6/DD/AUS-10i/CSIRO/{model}/evaluation/{experiment}/CCAM-v2203-SN/v1-r1/1hr'
+    version = 'v20231206'
 
     variables = ['tas', 'huss', 'uas', 'vas', 'rsds', 'rsus', 'rlds', 'rlus', 'ps', 'rsdsdir']
 
@@ -588,12 +583,12 @@ if __name__ == "__main__":
         wbgt_encoding = {"wbgt": encoding_params}
         
         # === Output paths depend on model and scenario ===
-        outdir = f"/scratch/e53/bxn599/aus10i/{model}_{scenario}"
+        outdir = f"/scratch/e53/bxn599/aus10i/{model}_evaluation"
         os.makedirs(outdir, exist_ok=True)
 
-        tnw_outfile = f"{outdir}/tnw_AUS-10i_{model}_{scenario}_{experiment}_CSIRO_CCAM-v2203-SN_v1-r1_1hr_{year}01010000-{year}12312300.nc"
-        tg_outfile = f"{outdir}/tg_AUS-10i_{model}_{scenario}_{experiment}_CSIRO_CCAM-v2203-SN_v1-r1_1hr_{year}01010000-{year}12312300.nc"
-        wbgt_outfile = f"{outdir}/wbgt_AUS-10i_{model}_{scenario}_{experiment}_CSIRO_CCAM-v2203-SN_v1-r1_1hr_{year}01010000-{year}12312300.nc"
+        tnw_outfile = f"{outdir}/tnw_AUS-10i_{model}_evaluation_{experiment}_CSIRO_CCAM-v2203-SN_v1-r1_1hr_{year}01010000-{year}12312300.nc"
+        tg_outfile = f"{outdir}/tg_AUS-10i_{model}_evaluation_{experiment}_CSIRO_CCAM-v2203-SN_v1-r1_1hr_{year}01010000-{year}12312300.nc"
+        wbgt_outfile = f"{outdir}/wbgt_AUS-10i_{model}_evaluation_{experiment}_CSIRO_CCAM-v2203-SN_v1-r1_1hr_{year}01010000-{year}12312300.nc"
 
 #        print(f"Writing files for year {year}")
 #        tnw_write = tnw_full.to_netcdf(tnw_outfile, encoding=tnw_encoding, engine='netcdf4', mode='w')

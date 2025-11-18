@@ -17,6 +17,11 @@ import subprocess
 import gc
 import dask
 
+# point to replace NaNs
+target_hour = 10
+target_lon = 127.5
+target_lat = 0.0
+
 def cdo_compress(infile):
     """Compress NetCDF file using CDO."""
     tmpfile = infile + ".tmp"
@@ -35,15 +40,25 @@ def preprocess_coords(ds):
     # Round only lon/lat to 4 decimals (adjust precision if needed)
     if "lon" in ds.coords:
         ds = ds.assign_coords(lon=ds.lon.round(1))
-        # Shift all longitudes by +0.01 degrees (to the right)
-        lon_shifted = (ds.lon + 0.01) % 360
-        ds = ds.assign_coords(lon=lon_shifted.round(4))
     if "lat" in ds.coords:
         ds = ds.assign_coords(lat=ds.lat.round(1))
     return ds
 
-def open_local_datasets(base_dir, variables, version, target_year):
+def preprocess_coords_shift(ds):
+    # Round only lon/lat to 4 decimals (adjust precision if needed)
+    if "lon" in ds.coords:
+        ds = ds.assign_coords(lon=ds.lon.round(1))
+        # Shift all longitudes by +0.000001 degrees (to the right)
+        lon_shifted = (ds.lon + 0.000001) % 360
+        ds = ds.assign_coords(lon=lon_shifted.round(6))
+    if "lat" in ds.coords:
+        ds = ds.assign_coords(lat=ds.lat.round(1))
+    return ds
+
+def open_local_datasets(base_dir, variables, version, target_year, use_shift=False):
     """Open local NetCDF datasets for each variable into a dictionary of DataArrays."""
+    preprocess_fn = preprocess_coords_shift if use_shift else preprocess_coords
+
     dsets = dict()
 
     start_year = target_year - 1
@@ -70,7 +85,7 @@ def open_local_datasets(base_dir, variables, version, target_year):
 
         print(f"Opening {len(files)} files for {var} ({start_year}-{end_year})")
 
-        ds = xr.open_mfdataset(files, combine='by_coords', parallel=True, engine='h5netcdf', chunks="auto", preprocess=preprocess_coords)
+        ds = xr.open_mfdataset(files, combine='by_coords', parallel=True, engine='h5netcdf', chunks="auto", preprocess=preprocess_fn)
         ds = drop_all_bounds(ds)
         dsets[var] = ds
     return dsets
@@ -140,6 +155,7 @@ if __name__ == "__main__":
 
     print("Opening datasets...")
     dsets = open_local_datasets(BASE_DIR, variables, version, year)
+    dsets_shift = open_local_datasets(BASE_DIR, variables, version, year, True)
     if not dsets:
         print("No datasets loaded, exiting.")
         sys.exit(1)
@@ -307,6 +323,180 @@ if __name__ == "__main__":
             WBGT.attrs["long_name"] = "Wet Bulb Globe Temperature"
             WBGT.attrs["units"] = "degK"
 
+             # REPEAT Month loop but with shifted longitude
+            print("Calculating on original grid complete, now calculating with shifted longitude")
+            # Select and chunk non-radiation variables (no need for previous month)
+            huss_shift = dsets_shift['huss'].sel(time=year_sel).chunk({'time': 24}).huss
+            tas_shift = dsets_shift['tas'].sel(time=year_sel).chunk({'time': 24}).tas
+            ps_shift = dsets_shift['ps'].sel(time=year_sel).chunk({'time': 24}).ps
+            uas_shift = dsets_shift['uas'].sel(time=year_sel).chunk({'time': 24}).uas
+            vas_shift = dsets_shift['vas'].sel(time=year_sel).chunk({'time': 24}).vas
+           
+            # Radiation variables: include last day of previous month for interpolation continuity
+            if month == 1:
+                prev_month_year = year - 1
+                prev_month = 12
+            else:
+                prev_month_year = year
+                prev_month = month - 1
+           
+            prev_last_day = calendar.monthrange(prev_month_year, prev_month)[1]
+            extended_start = f"{prev_month_year}-{prev_month:02d}-{prev_last_day}"
+            extended_end = month_end  # already defined above
+           
+            extended_sel = slice(extended_start, month_end)
+           
+            rlds_shift = dsets_shift['rlds'].sel(time=extended_sel).chunk({'time': 24}).rlds
+            rsds_shift = dsets_shift['rsds'].sel(time=extended_sel).chunk({'time': 24}).rsds
+            rlus_shift = dsets_shift['rlus'].sel(time=extended_sel).chunk({'time': 24}).rlus
+            rsus_shift = dsets_shift['rsus'].sel(time=extended_sel).chunk({'time': 24}).rsus
+            rsdsdir_shift = dsets_shift['rsdsdir'].sel(time=extended_sel).chunk({'time': 24}).rsdsdir
+
+            # fix rsdsdir at the start of each month
+            # Step 1: Identify the target times (first of month at 00:30)
+            is_first_of_month = (rsdsdir_shift['time'].dt.day == 1)
+            is_0030 = (rsdsdir_shift['time'].dt.hour == 0) & (rsdsdir_shift['time'].dt.minute == 30)
+            target_mask = is_first_of_month & is_0030
+           
+            # Step 2: Shift time by one step to get previous and next values
+            rsdsdir_shift_prev = rsdsdir_shift.shift(time=1)
+            rsdsdir_shift_next = rsdsdir_shift.shift(time=-1)
+           
+            first_of_month_time = f"{year}-{month:02d}-01T00:30:00"
+            print(
+                f"Before fix ({first_of_month_time}):",
+                float(
+                    rsdsdir_shift.sel(time=first_of_month_time)
+                    .mean(dim=["lat", "lon"])
+                    .compute()
+                )
+            )
+           
+            # Step 3: Interpolate linearly at target times
+            rsdsdir_shift = xr.where(
+                target_mask,
+                0.5 * (rsdsdir_shift_prev + rsdsdir_shift_next),
+                rsdsdir_shift
+            )
+           
+            print(
+                f"After fix  ({first_of_month_time}):",
+                float(
+                    rsdsdir_shift.sel(time=first_of_month_time)
+                    .mean(dim=["lat", "lon"])
+                    .compute()
+                )
+            )
+
+            rsdsdiff_shift = rsds_shift - rsdsdir_shift
+
+            # Interpolate radiation data to hourly
+            rsdsinterp_shift = interp(rsds_shift, year, month)
+            rsusinterp_shift = interp(rsus_shift, year, month)
+            rldsinterp_shift = interp(rlds_shift, year, month)
+            rlusinterp_shift = interp(rlus_shift, year, month)
+            rsdsdirinterp_shift = interp(rsdsdir_shift, year, month)
+            rsdsdiffinterp_shift = interp(rsdsdiff_shift, year, month)
+
+            # Create meshgrid for lat/lon in radians
+            lon_shift, lat_shift = np.meshgrid(huss_shift.lon.values, huss_shift.lat.values)
+            lat_shift_rad = lat_shift * np.pi / 180
+            lon_shift_rad = lon_shift * np.pi / 180
+
+            # Time coordinate chunked
+            date_shift = xr.DataArray(huss_shift.time.values, dims=('time'), coords={'time': huss_shift.time}).chunk({'time': 24})
+
+            # Cosine zenith angles with explicit dtype and correct chunking
+            cza_shift = xr.DataArray(
+                da.map_blocks(cosza, date_shift.data, lat_shift_rad, lon_shift_rad, 1,
+                              chunks=(24, lat_shift.shape[0], lat_shift.shape[1]),
+                              new_axis=[1, 2], dtype=float),
+                dims=huss_shift.dims, coords=huss_shift.coords
+            ).persist()
+
+            czda_shift = xr.DataArray(
+                da.map_blocks(coszda, date_shift.data, lat_shift_rad, lon_shift_rad, 1,
+                              chunks=(24, lat_shift.shape[0], lat_shift.shape[1]),
+                              new_axis=[1, 2], dtype=float),
+                dims=huss_shift.dims, coords=huss_shift.coords
+            )
+            czda_shift = xr.where(czda_shift <= 0, -0.5, czda_shift).persist()
+
+            print("Calculating vapor pressure")
+            ea_shift = xr.apply_ufunc(vaporpres, huss_shift, ps_shift,
+                               dask="parallelized", output_dtypes=[float])
+
+            print("Calculating wind speeds")
+            wind10m_shift = xr.apply_ufunc(lambda x, y: np.sqrt(x ** 2 + y ** 2),
+                                    uas_shift, vas_shift,
+                                    dask="parallelized", output_dtypes=[float])
+
+            wind2m_shift = xr.apply_ufunc(WBGT_analytic.getwind2m, wind10m_shift, czda_shift, rsdsinterp_shift,
+                                   dask="parallelized", output_dtypes=[float])
+
+            f_shift = (rsdsinterp_shift - rsdsdiffinterp_shift) / rsdsinterp_shift
+            f_shift = xr.where(cza_shift <= np.cos(89.5 / 180 * np.pi), 0, f_shift)
+            f_shift = xr.where(f_shift > 0.9, 0.9, f_shift)
+            f_shift = xr.where(f_shift < 0, 0, f_shift)
+            f_shift = xr.where(rsdsinterp_shift <= 0, 0, f_shift)
+
+            print("Calculating Tnw, Tg, WBGT")
+            Tnw_shift = xr.apply_ufunc(WBGT_analytic.calc_Tnw, tas_shift, ea_shift, ps_shift, wind2m_shift, czda_shift,
+                                 rsdsinterp_shift, rldsinterp_shift, rsusinterp_shift, rlusinterp_shift, f_shift,
+                                 dask="parallelized", output_dtypes=[float])
+
+            Tg_shift = xr.apply_ufunc(WBGT_analytic.calc_Tg, tas_shift, ps_shift, wind2m_shift, czda_shift,
+                                rsdsinterp_shift, rldsinterp_shift, rsusinterp_shift, rlusinterp_shift, f_shift,
+                                dask="parallelized", output_dtypes=[float])
+
+            WBGT_shift = xr.apply_ufunc(WBGT_analytic.calc_WBGT, tas_shift, ea_shift, ps_shift, wind2m_shift, czda_shift,
+                                 rsdsinterp_shift, rldsinterp_shift, rsusinterp_shift, rlusinterp_shift, f_shift,
+                                 dask="parallelized", output_dtypes=[float])
+
+            # Clean coordinates, assign metadata
+            coords_to_drop = [coord for coord in ["h10", "h2"] if coord in Tnw_shift.coords]
+            if coords_to_drop:
+                Tnw_shift = Tnw_shift.reset_coords(coords_to_drop, drop=True).astype("float32")
+            Tnw_shift.name = "tnw"
+            Tnw_shift.attrs["long_name"] = "Natural Wet Bulb Temperature"
+            Tnw_shift.attrs["units"] = "degK"
+
+            if coords_to_drop:
+                Tg_shift = Tg_shift.reset_coords(coords_to_drop, drop=True).astype("float32")
+            Tg_shift.name = "tg"
+            Tg_shift.attrs["long_name"] = "Black Globe Temperature"
+            Tg_shift.attrs["units"] = "degK"
+
+            if coords_to_drop:
+                WBGT_shift = WBGT_shift.reset_coords(coords_to_drop, drop=True).astype("float32")
+            WBGT_shift.name = "wbgt"
+            WBGT_shift.attrs["long_name"] = "Wet Bulb Globe Temperature"
+            WBGT_shift.attrs["units"] = "degK"
+
+            # Shift all longitudes by -0.000001 degrees (to the left)
+            lon_shifted_back = (WBGT_shift.lon - 0.000001) % 360
+            Tnw_shift = Tnw_shift.assign_coords(lon=lon_shifted_back.round(4))
+            Tg_shift = Tg_shift.assign_coords(lon=lon_shifted_back.round(4))
+            WBGT_shift = WBGT_shift.assign_coords(lon=lon_shifted_back.round(4))
+
+            # replace data at 10:00am, 127.5E, 0.0
+            print("Replacing 10:00am, 127.5E, 0.0")
+            mask = (
+                (Tnw['time'].dt.hour == target_hour) &
+                (Tnw['lon'] == target_lon) &
+                (Tnw['lat'] == target_lat)
+            )
+           
+            # Replace Tnw
+            Tnw = Tnw.where(~mask, Tnw_shift)
+           
+            # Replace Tg
+            Tg = Tg.where(~mask, Tg_shift)
+           
+            # Replace WBGT
+            WBGT = WBGT.where(~mask, WBGT_shift)
+            print("WBGT replaced")
+
             tnw_list.append(Tnw)
             tg_list.append(Tg)
             wbgt_list.append(WBGT)
@@ -318,12 +508,6 @@ if __name__ == "__main__":
         tnw_full = xr.concat(tnw_list, dim='time')
         tg_full = xr.concat(tg_list, dim='time')
         wbgt_full = xr.concat(wbgt_list, dim='time')
-
-        # Shift all longitudes by -0.01 degrees (to the left)
-        lon_shifted_back = (wbgt_full.lon - 0.01) % 360
-        tnw_full = tnw_full.assign_coords(lon=lon_shifted_back.round(4))
-        tg_full = tg_full.assign_coords(lon=lon_shifted_back.round(4))
-        wbgt_full = wbgt_full.assign_coords(lon=lon_shifted_back.round(4))
 
         # fix lat/lon attributes
         tnw_full = tnw_full.assign_coords(
